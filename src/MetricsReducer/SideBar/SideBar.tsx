@@ -29,10 +29,11 @@ import { EventSectionValueChanged } from './sections/EventSectionValueChanged';
 import { LabelsBrowser } from './sections/LabelsBrowser/LabelsBrowser';
 import { MetricsFilterSection } from './sections/MetricsFilterSection/MetricsFilterSection';
 import { RecentMetricsSection } from './sections/RecentMetricsSection/RecentMetricsSection';
+import { SEMCONV_SECTION_KEY, SemconvFilterSection } from './sections/SemconvFilterSection/SemconvFilterSection';
 import { CustomIcons, SideBarButton } from './SideBarButton';
 import { reportExploreMetrics } from '../../shared/tracking/interactions';
 
-type Section = MetricsFilterSection | RecentMetricsSection | LabelsBrowser | BookmarksList;
+type Section = MetricsFilterSection | RecentMetricsSection | LabelsBrowser | BookmarksList | SemconvFilterSection;
 
 interface SideBarState extends SceneObjectState {
   sections: Section[];
@@ -64,6 +65,13 @@ function getTranslatedSectionInfo(key: string): { title: string; description: st
         'Filter metrics based on when they started being ingested'
       ),
     },
+    'filters-semconv': {
+      title: t('sidebar.section.semconv-filters', 'Semantic conventions'),
+      description: t(
+        'sidebar.section.semconv-filters-description',
+        'Filter metrics by OpenTelemetry semantic-convention namespace'
+      ),
+    },
     'groupby-labels': {
       title: t('sidebar.section.group-by-labels', 'Group by labels'),
       description: t('sidebar.section.group-by-labels-description', 'Group metrics by their label values'),
@@ -82,6 +90,7 @@ export const metricFilters = {
   prefix: 'filters-prefix',
   suffix: 'filters-suffix',
   recent: 'filters-recent',
+  semconv: 'filters-semconv',
 } as const;
 const metricFiltersVariables = getObjectValues(metricFilters);
 type MetricFiltersVariable = (typeof metricFiltersVariables)[number];
@@ -136,6 +145,15 @@ export class SideBar extends SceneObjectBase<SideBarState> {
           ),
           icon: 'clock-nine',
           active: Boolean(sectionValues.get('filters-recent')?.length),
+        }),
+        new SemconvFilterSection({
+          title: t('sidebar.section.semconv-filters', 'Semantic conventions'),
+          description: t(
+            'sidebar.section.semconv-filters-description',
+            'Filter metrics by OpenTelemetry semantic-convention namespace'
+          ),
+          icon: 'book',
+          active: Boolean(sectionValues.get(SEMCONV_SECTION_KEY)?.length),
         }),
         new LabelsBrowser({
           key: 'groupby-labels',
@@ -194,6 +212,7 @@ export class SideBar extends SceneObjectBase<SideBarState> {
       'filters-prefix': t('sidebar.filter-type.prefix', 'prefix'),
       'filters-suffix': t('sidebar.filter-type.suffix', 'suffix'),
       'filters-recent': t('sidebar.filter-type.recent', 'recent'),
+      'filters-semconv': t('sidebar.filter-type.semconv', 'semconv namespace'),
     };
 
     const newFilters = Array.from(sectionValues.entries()).reduce<Array<AdHocFilterWithLabels<{}>>>(
@@ -410,6 +429,7 @@ export class SideBar extends SceneObjectBase<SideBarState> {
               {/* TODO: find a better way */}
               {visibleSection instanceof MetricsFilterSection && <visibleSection.Component model={visibleSection} />}
               {visibleSection instanceof RecentMetricsSection && <visibleSection.Component model={visibleSection} />}
+              {visibleSection instanceof SemconvFilterSection && <visibleSection.Component model={visibleSection} />}
               {visibleSection instanceof LabelsBrowser && <visibleSection.Component model={visibleSection} />}
               {visibleSection instanceof BookmarksList && <visibleSection.Component model={visibleSection} />}
             </div>

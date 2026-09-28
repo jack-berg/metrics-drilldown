@@ -26,6 +26,8 @@ import { SloTrackedBadge } from 'shared/GmdVizPanel/components/SloTrackedBadge';
 import { GmdVizPanel } from 'shared/GmdVizPanel/GmdVizPanel';
 import { getTrailFor } from 'shared/utils/utils';
 
+import { enrichGmdVizPanelWithSemconv } from '../../semconv/enrichGmdVizPanel';
+
 import { VIZ_PANEL_HEIGHT, WithUsageDataPreviewPanel } from './WithUsageDataPreviewPanel';
 
 export const GRID_TEMPLATE_COLUMNS = 'repeat(auto-fit, minmax(400px, 1fr))';
@@ -82,25 +84,27 @@ export class MetricsList extends SceneObjectBase<MetricsListState> {
         getLayoutChild: (option, colorIndex) => {
           const metricName = option.value as string;
           const entry = getTrailFor(this).state.sourceMetrics?.find((s) => s.metricName === metricName);
+          const gmdVizPanel = new GmdVizPanel({
+            metric: metricName,
+            panelOptions: {
+              fixedColorIndex: colorIndex,
+              headerActions: ({ metric }) => [
+                new FiringAlertBadge({ metric: metric.name }),
+                new SloTrackedBadge({ metric: metric.name }),
+                new SelectAction({ metric: metric.name, variant: 'secondary' }),
+              ],
+            },
+            queryOptions: {
+              customRateInterval: entry?.customRateInterval,
+              customFunction: entry?.customFunction,
+              kgMetricType: entry?.metricType,
+            },
+          });
+          enrichGmdVizPanelWithSemconv(gmdVizPanel, metricName);
           return new SceneCSSGridItem({
             body: new WithUsageDataPreviewPanel({
               metric: metricName,
-              vizPanelInGridItem: new GmdVizPanel({
-                metric: metricName,
-                panelOptions: {
-                  fixedColorIndex: colorIndex,
-                  headerActions: ({ metric }) => [
-                    new FiringAlertBadge({ metric: metric.name }),
-                    new SloTrackedBadge({ metric: metric.name }),
-                    new SelectAction({ metric: metric.name, variant: 'secondary' }),
-                  ],
-                },
-                queryOptions: {
-                  customRateInterval: entry?.customRateInterval,
-                  customFunction: entry?.customFunction,
-                  kgMetricType: entry?.metricType,
-                },
-              }),
+              vizPanelInGridItem: gmdVizPanel,
             }),
           });
         },

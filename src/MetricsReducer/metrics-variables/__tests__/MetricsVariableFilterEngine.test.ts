@@ -274,7 +274,7 @@ describe('MetricsVariableFilterEngine - firingAlertMetrics filtering', () => {
     engine.setInitOptions(options);
     // forceUpdate: true so the reset path runs even though the engine starts with empty filters
     engine.applyFilters(
-      { categories: [], prefixes: [], suffixes: [], names: [], firingAlertMetrics: [], sloTrackedMetrics: [] },
+      { categories: [], prefixes: [], suffixes: [], names: [], firingAlertMetrics: [], sloTrackedMetrics: [], semconvMetrics: [] },
       { forceUpdate: true, notify: false }
     );
 
@@ -311,6 +311,7 @@ describe('MetricsVariableFilterEngine - sloTrackedMetrics filtering', () => {
       suffixes: ['total'],
       names: ['.*api.*'],
       firingAlertMetrics: ['http_api_requests_total', 'http_web_requests_total'],
+      semconvMetrics: [],
       sloTrackedMetrics: ['http_api_requests_total', 'http_api_errors_total'],
     });
 
