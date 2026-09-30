@@ -28,6 +28,7 @@ import { QUERY_RESOLUTION } from 'shared/GmdVizPanel/config/query-resolutions';
 import { type HistogramBreakdownFn } from 'shared/GmdVizPanel/GmdVizPanel';
 import { type Metric } from 'shared/GmdVizPanel/matchers/getMetricType';
 import { addCardinalityInfo } from 'shared/GmdVizPanel/types/timeseries/behaviors/addCardinalityInfo';
+import { enrichVizPanel } from '@grafana/otel-semconv-client';
 import { buildTimeseriesPanel } from 'shared/GmdVizPanel/types/timeseries/buildTimeseriesPanel';
 import { VAR_GROUP_BY, VAR_HISTOGRAM_BREAKDOWN_FN } from 'shared/shared';
 import { getTrailFor } from 'shared/utils/utils';
@@ -154,6 +155,13 @@ export class MetricLabelsList extends SceneObjectBase<MetricLabelsListState> {
               binaryExpr: trail?.state.binaryQuery,
               histogramBreakdownFn,
             },
+          });
+
+          enrichVizPanel(panel, {
+            name: label,
+            kind: 'attribute',
+            signal: { attributes: 'prom-label' },
+            slot: 'titleItem',
           });
 
           // Wrap panel with click navigation in embeddedMini mode

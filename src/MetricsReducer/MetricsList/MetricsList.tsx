@@ -26,7 +26,7 @@ import { SloTrackedBadge } from 'shared/GmdVizPanel/components/SloTrackedBadge';
 import { GmdVizPanel } from 'shared/GmdVizPanel/GmdVizPanel';
 import { getTrailFor } from 'shared/utils/utils';
 
-import { enrichGmdVizPanelWithSemconv } from '../../semconv/enrichGmdVizPanel';
+import { enrichVizPanel } from '@grafana/otel-semconv-client';
 
 import { VIZ_PANEL_HEIGHT, WithUsageDataPreviewPanel } from './WithUsageDataPreviewPanel';
 
@@ -100,7 +100,18 @@ export class MetricsList extends SceneObjectBase<MetricsListState> {
               kgMetricType: entry?.metricType,
             },
           });
-          enrichGmdVizPanelWithSemconv(gmdVizPanel, metricName);
+          gmdVizPanel.addActivationHandler(() => {
+            const body = gmdVizPanel.state.body;
+            if (!body) {
+              return;
+            }
+            enrichVizPanel(body, {
+              name: metricName,
+              kind: 'metric',
+              signal: { metrics: 'prometheus' },
+              slot: 'titleItem',
+            });
+          });
           return new SceneCSSGridItem({
             body: new WithUsageDataPreviewPanel({
               metric: metricName,

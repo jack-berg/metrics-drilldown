@@ -14,6 +14,7 @@ import {
 import { useStyles2 } from '@grafana/ui';
 import React, { useRef } from 'react';
 
+import { enrichVizPanel } from '@grafana/otel-semconv-client';
 import { getMetricDescription } from 'AppDataTrail/MetricDatasourceHelper/MetricDatasourceHelper';
 import { AddToDashboardAction } from 'shared/GmdVizPanel/components/AddToDashboardAction';
 import { BookmarkHeaderAction } from 'shared/GmdVizPanel/components/BookmarkHeaderAction';
@@ -173,6 +174,19 @@ export class MetricGraphScene extends SceneObjectBase<MetricGraphSceneState> {
       if (metadata) {
         gmdVizPanel.update({ description: getMetricDescription(metadata) }, {});
       }
+    }
+
+    // Semconv enrichment via a titleItem alongside the (Prometheus-sourced)
+    // description above. Two affordances by design: description shows what
+    // this datasource emitted; titleItem shows what the OTel spec defines.
+    const body = gmdVizPanel.state.body;
+    if (body) {
+      enrichVizPanel(body, {
+        name: metric,
+        kind: 'metric',
+        signal: { metrics: 'prometheus' },
+        slot: 'titleItem',
+      });
     }
 
     if (metricType === 'classic-histogram') {

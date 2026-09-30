@@ -15,17 +15,11 @@ import {
 import { Button, Checkbox, LoadingPlaceholder, useStyles2 } from '@grafana/ui';
 
 import {
-  VAR_FILTERED_METRICS_VARIABLE,
-  type FilteredMetricsVariable,
-} from 'MetricsReducer/metrics-variables/FilteredMetricsVariable';
-import {
   MetricsVariable,
   VAR_METRICS_VARIABLE,
   type MetricOptions,
 } from 'MetricsReducer/metrics-variables/MetricsVariable';
-import { fetchAllSemconvMetrics } from 'semconv/client';
-import { toSemconvMetricKey } from 'semconv/normalize';
-import type { SemconvMetric } from 'semconv/types';
+import { getDefaultSemconvSession, type SemconvMetric } from '@grafana/otel-semconv-client';
 
 import { EventSectionValueChanged } from '../EventSectionValueChanged';
 import { EventFiltersChanged } from '../MetricsFilterSection/EventFiltersChanged';
@@ -45,7 +39,8 @@ interface SemconvFilterSectionState extends SideBarSectionState {
   groups: SemconvGroup[];
   selectedNamespaces: string[];
   loading: boolean;
-  semconvMap: Map<string, SemconvMetric>;
+  /** Raw prom metric name -> canonical namespace (or null if unknown). */
+  bucketMap: Map<string, string | null>;
 }
 
 /** Filters the metric list by OpenTelemetry semantic-convention namespace. */
@@ -53,13 +48,11 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
   protected _urlSync = new SceneObjectUrlSyncConfig(this, { keys: [SEMCONV_SECTION_KEY] });
 
   protected _variableDependency = new VariableDependencyConfig(this, {
-    variableNames: [VAR_METRICS_VARIABLE, VAR_FILTERED_METRICS_VARIABLE],
+    variableNames: [VAR_METRICS_VARIABLE],
     onReferencedVariableValueChanged: (variable) => {
       const { name, options } = (variable as MultiValueVariable).state;
       if (name === VAR_METRICS_VARIABLE) {
         this.recomputeGroups(options as MetricOptions);
-      } else if (name === VAR_FILTERED_METRICS_VARIABLE) {
-        this.recomputeCounts();
       }
     },
   });
@@ -98,6 +91,7 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
   }) {
     super({
       active: active ?? false,
+      bucketMap: new Map<string, string | null>(),
       description,
       disabled: disabled ?? false,
       groups: [],
@@ -105,7 +99,6 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
       key: SEMCONV_SECTION_KEY,
       loading: true,
       selectedNamespaces: [],
-      semconvMap: new Map<string, SemconvMetric>(),
       title,
     });
 
@@ -113,22 +106,49 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
   }
 
   private onActivate() {
-    fetchAllSemconvMetrics().then((semconvMap) => {
-      this.setState({ semconvMap });
-      const metricsVar = sceneGraph.findByKeyAndType(this, VAR_METRICS_VARIABLE, MetricsVariable);
-      this.recomputeGroups(metricsVar.state.options as MetricOptions);
-      // Re-emit any URL-restored selection now that the map is loaded.
-      if (this.state.selectedNamespaces.length > 0) {
-        this.emitFilter(this.state.selectedNamespaces);
-      }
-    });
+    const metricsVar = sceneGraph.findByKeyAndType(this, VAR_METRICS_VARIABLE, MetricsVariable);
+    this.recomputeGroups(metricsVar.state.options as MetricOptions);
   }
 
-  private recomputeGroups(options: MetricOptions) {
-    const { semconvMap } = this.state;
+  /**
+   * Fetch semconv namespace for every metric we haven't classified yet.
+   * Uses the shared session so tooltips and other consumers coalesce into
+   * the same POST /lookup.
+   */
+  private async ensureBucketsFor(options: MetricOptions): Promise<Map<string, string | null>> {
+    const session = getDefaultSemconvSession();
+    if (!session) {
+      return this.state.bucketMap;
+    }
+    const missing: string[] = [];
+    for (const opt of options) {
+      const name = opt.value as string;
+      if (!this.state.bucketMap.has(name)) {
+        missing.push(name);
+      }
+    }
+    if (missing.length === 0) {
+      return this.state.bucketMap;
+    }
+    const results = await session.getMany<SemconvMetric>({
+      kind: 'metric',
+      keys: missing,
+      signal: { metrics: 'prometheus' },
+      fields: ['namespace'],
+    });
+    const next = new Map(this.state.bucketMap);
+    for (const name of missing) {
+      const entry = results.get(name);
+      next.set(name, entry?.namespace ?? null);
+    }
+    return next;
+  }
+
+  private async recomputeGroups(options: MetricOptions) {
+    const bucketMap = await this.ensureBucketsFor(options);
     const counts = new Map<string, number>();
     for (const opt of options) {
-      const bucket = bucketFor(opt.value as string, semconvMap);
+      const bucket = bucketFor(opt.value as string, bucketMap);
       counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
     }
     const groups = Array.from(counts.entries())
@@ -146,39 +166,27 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
         }
         return a.value.localeCompare(b.value);
       });
-    this.setState({ groups, loading: false });
-  }
-
-  /** Update counts to reflect the filtered metric list without changing group visibility. */
-  private recomputeCounts() {
-    const { semconvMap } = this.state;
-    const filteredVar = sceneGraph.lookupVariable(VAR_FILTERED_METRICS_VARIABLE, this) as
-      | (FilteredMetricsVariable & { state: { options: MetricOptions } })
-      | undefined;
-    const filteredOptions = filteredVar?.state.options;
-    if (!filteredOptions) {
-      return;
+    this.setState({ bucketMap, groups, loading: false });
+    // Re-emit any URL-restored selection now that the bucket map is
+    // loaded. Empty selection = no filter, consistent with prefix/suffix
+    // filter sections.
+    if (this.state.selectedNamespaces.length > 0) {
+      this.emitFilter(this.state.selectedNamespaces);
     }
-    const counts = new Map<string, number>();
-    for (const opt of filteredOptions) {
-      const bucket = bucketFor(opt.value as string, semconvMap);
-      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
-    }
-    this.setState({
-      groups: this.state.groups.map((g) => ({ ...g, count: counts.get(g.value) ?? 0 })),
-    });
   }
 
   private emitFilter(selectedNamespaces: string[]) {
-    const { semconvMap } = this.state;
+    const { bucketMap } = this.state;
     const metricsVar = sceneGraph.findByKeyAndType(this, VAR_METRICS_VARIABLE, MetricsVariable);
     const allOptions = metricsVar.state.options as MetricOptions;
     const selectedSet = new Set(selectedNamespaces);
 
+    // Empty selection = no filter (show all), matching prefix/suffix
+    // filter semantics.
     const matched: string[] = [];
     if (selectedNamespaces.length > 0) {
       for (const opt of allOptions) {
-        const bucket = bucketFor(opt.value as string, semconvMap);
+        const bucket = bucketFor(opt.value as string, bucketMap);
         if (selectedSet.has(bucket)) {
           matched.push(opt.value as string);
         }
@@ -260,12 +268,9 @@ function SemconvFilterSectionRenderer({ model }: SceneComponentProps<SemconvFilt
   );
 }
 
-function bucketFor(metricName: string, semconvMap: Map<string, SemconvMetric>): string {
-  const canonical = toSemconvMetricKey(metricName);
-  if (canonical && semconvMap.has(canonical)) {
-    return canonical.split('.')[0] || NOT_IN_SEMCONV_VALUE;
-  }
-  return NOT_IN_SEMCONV_VALUE;
+function bucketFor(metricName: string, bucketMap: Map<string, string | null>): string {
+  const ns = bucketMap.get(metricName);
+  return ns ?? NOT_IN_SEMCONV_VALUE;
 }
 
 function labelFor(value: string): string {

@@ -1,5 +1,6 @@
 import { css } from '@emotion/css';
 import { type AppRootProps, type GrafanaTheme2 } from '@grafana/data';
+import { SemconvProvider } from '@grafana/otel-semconv-client';
 import { config } from '@grafana/runtime';
 import { useStyles2 } from '@grafana/ui';
 import React from 'react';
@@ -34,7 +35,9 @@ export default function App(props: Readonly<AppRootProps>) {
       <AppErrorBoundary>
         <PluginPropsContext.Provider value={props}>
           <AppContext.Provider value={{ trail: defaultTrail }}>
-            <AppRoutes />
+            <SemconvProvider>
+              <AppRoutes />
+            </SemconvProvider>
           </AppContext.Provider>
         </PluginPropsContext.Provider>
       </AppErrorBoundary>
