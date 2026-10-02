@@ -1,25 +1,28 @@
 import { css } from '@emotion/css';
-import React from 'react';
-
 import { type GrafanaTheme2 } from '@grafana/data';
 import { t, Trans } from '@grafana/i18n';
+import {
+  getDefaultSemconvSession,
+  registryDefinitionPath,
+  SEMCONV_METRIC_FAMILY_PARAM,
+  type SemconvMetric,
+} from '@grafana/otel-semconv-client';
+import { config } from '@grafana/runtime';
 import {
   sceneGraph,
   SceneObjectBase,
   SceneObjectUrlSyncConfig,
-  VariableDependencyConfig,
-  type MultiValueVariable,
   type SceneComponentProps,
   type SceneObjectUrlValues,
 } from '@grafana/scenes';
-import { Button, Checkbox, LoadingPlaceholder, useStyles2 } from '@grafana/ui';
+import { Button, Checkbox, Icon, Input, LoadingPlaceholder, useStyles2 } from '@grafana/ui';
+import React, { useEffect, useId, useRef } from 'react';
 
 import {
-  MetricsVariable,
   VAR_METRICS_VARIABLE,
   type MetricOptions,
+  type MetricsVariable,
 } from 'MetricsReducer/metrics-variables/MetricsVariable';
-import { getDefaultSemconvSession, type SemconvMetric } from '@grafana/otel-semconv-client';
 
 import { EventSectionValueChanged } from '../EventSectionValueChanged';
 import { EventFiltersChanged } from '../MetricsFilterSection/EventFiltersChanged';
@@ -28,53 +31,32 @@ import { type SideBarSectionState } from '../types';
 
 export const SEMCONV_SECTION_KEY = 'filters-semconv';
 export const NOT_IN_SEMCONV_VALUE = '__not_in_semconv__';
+export const SEMCONV_UNMATCHED_PARAM = 'semconvUnmatched';
 
-interface SemconvGroup {
-  label: string;
-  value: string;
-  count: number;
+export function unmatchedMetricLabel() {
+  return t('sidebar.semconv.no-registry-match', 'No registry match');
 }
+
+type MetricIdentity = Pick<SemconvMetric, 'name' | 'namespace'>;
 
 interface SemconvFilterSectionState extends SideBarSectionState {
-  groups: SemconvGroup[];
+  families: string[];
+  selectedFamilies: string[];
+  includeUnmatched: boolean;
   selectedNamespaces: string[];
-  loading: boolean;
-  /** Raw prom metric name -> canonical namespace (or null if unknown). */
-  bucketMap: Map<string, string | null>;
+  search: string;
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  options: MetricOptions;
+  bucketMap: Map<string, MetricIdentity | null>;
 }
 
-/** Filters the metric list by OpenTelemetry semantic-convention namespace. */
 export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionState> {
-  protected _urlSync = new SceneObjectUrlSyncConfig(this, { keys: [SEMCONV_SECTION_KEY] });
-
-  protected _variableDependency = new VariableDependencyConfig(this, {
-    variableNames: [VAR_METRICS_VARIABLE],
-    onReferencedVariableValueChanged: (variable) => {
-      const { name, options } = (variable as MultiValueVariable).state;
-      if (name === VAR_METRICS_VARIABLE) {
-        this.recomputeGroups(options as MetricOptions);
-      }
-    },
+  protected _urlSync = new SceneObjectUrlSyncConfig(this, {
+    keys: [SEMCONV_SECTION_KEY, SEMCONV_METRIC_FAMILY_PARAM, SEMCONV_UNMATCHED_PARAM],
   });
-
-  getUrlState() {
-    return { [SEMCONV_SECTION_KEY]: this.state.selectedNamespaces.join(',') };
-  }
-
-  updateFromUrl(values: SceneObjectUrlValues) {
-    const raw = values[SEMCONV_SECTION_KEY];
-    if (typeof raw !== 'string') {
-      return;
-    }
-    const next = raw
-      .split(',')
-      .map((v) => v.trim())
-      .filter(Boolean);
-    if (next.join(',') !== this.state.selectedNamespaces.join(',')) {
-      this.setState({ selectedNamespaces: next });
-      this.emitFilter(next);
-    }
-  }
+  private generation = 0;
+  private requested = false;
+  private inFlight?: { options: MetricOptions; promise: Promise<void> };
 
   constructor({
     title,
@@ -82,202 +64,381 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
     icon,
     active,
     disabled,
-  }: {
-    title: SideBarSectionState['title'];
-    description: SideBarSectionState['description'];
-    icon: SideBarSectionState['icon'];
-    active?: SideBarSectionState['active'];
-    disabled?: SideBarSectionState['disabled'];
+    selectedFamilies = [],
+    includeUnmatched = false,
+    selectedNamespaces = [],
+  }: Pick<SideBarSectionState, 'title' | 'description' | 'icon'> & {
+    active?: boolean;
+    disabled?: boolean;
+    selectedFamilies?: string[];
+    includeUnmatched?: boolean;
+    selectedNamespaces?: string[];
   }) {
     super({
-      active: active ?? false,
-      bucketMap: new Map<string, string | null>(),
-      description,
+      active: active ?? (selectedFamilies.length > 0 || includeUnmatched || selectedNamespaces.length > 0),
       disabled: disabled ?? false,
-      groups: [],
+      description,
       icon,
-      key: SEMCONV_SECTION_KEY,
-      loading: true,
-      selectedNamespaces: [],
       title,
+      key: SEMCONV_SECTION_KEY,
+      families: [],
+      selectedFamilies: [...selectedFamilies],
+      includeUnmatched,
+      selectedNamespaces: [...selectedNamespaces],
+      search: '',
+      status: 'idle',
+      options: [],
+      bucketMap: new Map(),
     });
-
-    this.addActivationHandler(this.onActivate.bind(this));
+    this.addActivationHandler(() => {
+      const variable = sceneGraph.lookupVariable(VAR_METRICS_VARIABLE, this) as MetricsVariable | undefined;
+      if (variable) {
+        this._subs.add(
+          variable.subscribeToState((next, previous) => {
+            if (next.options !== previous.options || next.loading !== previous.loading) {
+              void this.refresh();
+            }
+          })
+        );
+      }
+      this.emitFilter(this.state.selectedFamilies.length > 0 || this.state.includeUnmatched);
+      void this.refresh();
+      return () => {
+        this.generation++;
+        this.inFlight = undefined;
+      };
+    });
   }
 
-  private onActivate() {
-    const metricsVar = sceneGraph.findByKeyAndType(this, VAR_METRICS_VARIABLE, MetricsVariable);
-    this.recomputeGroups(metricsVar.state.options as MetricOptions);
+  getUrlState() {
+    return {
+      [SEMCONV_SECTION_KEY]: this.state.selectedNamespaces.join(','),
+      [SEMCONV_METRIC_FAMILY_PARAM]: this.state.selectedFamilies,
+      [SEMCONV_UNMATCHED_PARAM]: this.state.includeUnmatched ? 'true' : '',
+    };
   }
 
-  /**
-   * Fetch semconv namespace for every metric we haven't classified yet.
-   * Uses the shared session so tooltips and other consumers coalesce into
-   * the same POST /lookup.
-   */
-  private async ensureBucketsFor(options: MetricOptions): Promise<Map<string, string | null>> {
-    const session = getDefaultSemconvSession();
-    if (!session) {
-      return this.state.bucketMap;
+  updateFromUrl(values: SceneObjectUrlValues) {
+    const raw = values[SEMCONV_METRIC_FAMILY_PARAM];
+    let familyValues: string[] = [];
+    if (typeof raw === 'string') {
+      familyValues = [raw];
+    } else if (Array.isArray(raw)) {
+      familyValues = raw;
     }
-    const missing: string[] = [];
-    for (const opt of options) {
-      const name = opt.value as string;
-      if (!this.state.bucketMap.has(name)) {
-        missing.push(name);
+    const selectedFamilies = [...new Set(familyValues.filter(Boolean))];
+    const includeUnmatched = values[SEMCONV_UNMATCHED_PARAM] === 'true';
+    const legacy = values[SEMCONV_SECTION_KEY];
+    const selectedNamespaces =
+      typeof legacy === 'string'
+        ? legacy
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [];
+    if (
+      JSON.stringify(selectedFamilies) === JSON.stringify(this.state.selectedFamilies) &&
+      includeUnmatched === this.state.includeUnmatched &&
+      JSON.stringify(selectedNamespaces) === JSON.stringify(this.state.selectedNamespaces)
+    ) {
+      return;
+    }
+    this.setState({ selectedFamilies, includeUnmatched, selectedNamespaces, search: '' });
+    this.emitFilter(selectedFamilies.length > 0 || includeUnmatched);
+    if (this.isActive) {
+      void this.refresh();
+    }
+  }
+
+  public getFilter(options: MetricOptions = this.state.options): string[] | undefined {
+    const { selectedFamilies, includeUnmatched, selectedNamespaces, bucketMap, status } = this.state;
+    if (!selectedFamilies.length && !includeUnmatched && !selectedNamespaces.length) {
+      return undefined;
+    }
+    if (status !== 'ready' || options.some((option) => !bucketMap.has(option.value))) {
+      return [];
+    }
+    const families = new Set(selectedFamilies);
+    const restrictFamilies = families.size > 0 || includeUnmatched;
+    const namespaces = new Set(selectedNamespaces);
+    return options
+      .filter((option) => {
+        const entry = bucketMap.get(option.value);
+        const namespace = entry ? (entry.namespace ?? entry.name.split('.')[0]) : NOT_IN_SEMCONV_VALUE;
+        return (
+          (!restrictFamilies || (entry ? families.has(entry.name) : includeUnmatched)) &&
+          (!namespaces.size || namespaces.has(namespace))
+        );
+      })
+      .map((option) => option.value);
+  }
+
+  public requestFamilies = () => {
+    this.requested = true;
+    void this.refresh();
+  };
+
+  public refresh = async () => {
+    if (
+      !this.requested &&
+      !this.state.selectedFamilies.length &&
+      !this.state.includeUnmatched &&
+      !this.state.selectedNamespaces.length
+    ) {
+      return;
+    }
+    const variable = sceneGraph.lookupVariable(VAR_METRICS_VARIABLE, this) as MetricsVariable | undefined;
+    if (!variable || variable.state.loading) {
+      this.generation++;
+      this.inFlight = undefined;
+      this.setState({ options: [], families: [], status: 'loading' });
+      this.emitFilter();
+      return;
+    }
+    const options = variable.state.options as MetricOptions;
+    if (this.inFlight?.options === options) {
+      return this.inFlight.promise;
+    }
+    const promise = this.classify(options, ++this.generation);
+    this.inFlight = { options, promise };
+    try {
+      await promise;
+    } finally {
+      if (this.inFlight?.promise === promise) {
+        this.inFlight = undefined;
       }
     }
-    if (missing.length === 0) {
-      return this.state.bucketMap;
+  };
+
+  private async classify(options: MetricOptions, generation: number) {
+    this.setState({ options, status: 'loading' });
+    this.emitFilter();
+    try {
+      const missing = [
+        ...new Set(options.map((option) => option.value).filter((name) => !this.state.bucketMap.has(name))),
+      ];
+      const bucketMap = missing.length ? await this.lookupBuckets(missing) : this.state.bucketMap;
+      if (generation !== this.generation) {
+        return;
+      }
+      const families = [
+        ...new Set(
+          options.flatMap((option) => {
+            const entry = bucketMap.get(option.value);
+            return entry ? [entry.name] : [];
+          })
+        ),
+      ].sort((a, b) => a.localeCompare(b));
+      this.setState({ bucketMap, families, status: 'ready' });
+      this.emitFilter();
+    } catch {
+      if (generation !== this.generation) {
+        return;
+      }
+      this.setState({ status: 'error' });
+      this.emitFilter();
+    }
+  }
+
+  private async lookupBuckets(keys: string[]) {
+    const bucketMap = new Map(this.state.bucketMap);
+    const session = getDefaultSemconvSession();
+    if (!session) {
+      throw new Error('Registry session unavailable');
     }
     const results = await session.getMany<SemconvMetric>({
       kind: 'metric',
-      keys: missing,
+      keys,
       signal: { metrics: 'prometheus' },
       fields: ['namespace'],
     });
-    const next = new Map(this.state.bucketMap);
-    for (const name of missing) {
+    for (const name of keys) {
       const entry = results.get(name);
-      next.set(name, entry?.namespace ?? null);
+      bucketMap.set(name, entry ? { name: entry.name, namespace: entry.namespace } : null);
     }
-    return next;
+    return bucketMap;
   }
 
-  private async recomputeGroups(options: MetricOptions) {
-    const bucketMap = await this.ensureBucketsFor(options);
-    const counts = new Map<string, number>();
-    for (const opt of options) {
-      const bucket = bucketFor(opt.value as string, bucketMap);
-      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
-    }
-    const groups = Array.from(counts.entries())
-      .map(([value, count]) => ({ count, label: labelFor(value), value }))
-      // Not-in-semconv sinks to bottom, then by count desc, then alpha.
-      .sort((a, b) => {
-        if (a.value === NOT_IN_SEMCONV_VALUE) {
-          return 1;
-        }
-        if (b.value === NOT_IN_SEMCONV_VALUE) {
-          return -1;
-        }
-        if (a.count !== b.count) {
-          return b.count - a.count;
-        }
-        return a.value.localeCompare(b.value);
-      });
-    this.setState({ bucketMap, groups, loading: false });
-    // Re-emit any URL-restored selection now that the bucket map is
-    // loaded. Empty selection = no filter, consistent with prefix/suffix
-    // filter sections.
-    if (this.state.selectedNamespaces.length > 0) {
-      this.emitFilter(this.state.selectedNamespaces);
-    }
-  }
-
-  private emitFilter(selectedNamespaces: string[]) {
-    const { bucketMap } = this.state;
-    const metricsVar = sceneGraph.findByKeyAndType(this, VAR_METRICS_VARIABLE, MetricsVariable);
-    const allOptions = metricsVar.state.options as MetricOptions;
-    const selectedSet = new Set(selectedNamespaces);
-
-    // Empty selection = no filter (show all), matching prefix/suffix
-    // filter semantics.
-    const matched: string[] = [];
-    if (selectedNamespaces.length > 0) {
-      for (const opt of allOptions) {
-        const bucket = bucketFor(opt.value as string, bucketMap);
-        if (selectedSet.has(bucket)) {
-          matched.push(opt.value as string);
-        }
-      }
-    }
-
-    this.setState({ active: selectedNamespaces.length > 0 });
-
+  private emitFilter(open = false) {
+    const { selectedFamilies, includeUnmatched, selectedNamespaces } = this.state;
+    this.setState({ active: selectedFamilies.length > 0 || includeUnmatched || selectedNamespaces.length > 0 });
     this.publishEvent(
-      new EventSectionValueChanged({ key: SEMCONV_SECTION_KEY, values: selectedNamespaces }),
+      new EventSectionValueChanged({
+        key: SEMCONV_SECTION_KEY,
+        values: [
+          ...selectedFamilies,
+          ...(includeUnmatched ? [unmatchedMetricLabel()] : []),
+          ...selectedNamespaces.map(legacyNamespaceLabel),
+        ],
+        open,
+      }),
       true
     );
-    this.publishEvent(new EventFiltersChanged({ filters: matched, type: 'semconvMetrics' }), true);
+    this.publishEvent(new EventFiltersChanged({ filters: this.getFilter(), type: 'semconvMetrics' }), true);
   }
 
-  public onToggle = (value: string) => {
-    const set = new Set(this.state.selectedNamespaces);
-    if (set.has(value)) {
-      set.delete(value);
+  public onToggle = (name: string) => {
+    const selected = new Set(this.state.selectedFamilies);
+    if (selected.has(name)) {
+      selected.delete(name);
     } else {
-      set.add(value);
+      selected.add(name);
     }
-    const next = Array.from(set);
-    this.setState({ selectedNamespaces: next });
-    this.emitFilter(next);
+    this.setState({ selectedFamilies: [...selected] });
+    this.emitFilter();
+  };
+
+  public onToggleUnmatched = () => {
+    this.setState({ includeUnmatched: !this.state.includeUnmatched });
+    this.emitFilter();
   };
 
   public onSelectAll = () => {
-    const next = this.state.groups.map((g) => g.value);
-    this.setState({ selectedNamespaces: next });
-    this.emitFilter(next);
+    const search = this.state.search.toLowerCase().trim();
+    const visible = this.state.families.filter((name) => name.toLowerCase().includes(search));
+    this.setState({ selectedFamilies: [...new Set([...this.state.selectedFamilies, ...visible])] });
+    this.emitFilter();
   };
 
   public onClear = () => {
+    this.setState({ selectedFamilies: [], includeUnmatched: false, selectedNamespaces: [] });
+    this.emitFilter();
+  };
+
+  public onClearNamespaces = () => {
     this.setState({ selectedNamespaces: [] });
-    this.emitFilter([]);
+    this.emitFilter();
   };
 
   public static readonly Component = SemconvFilterSectionRenderer;
 }
 
-function SemconvFilterSectionRenderer({ model }: SceneComponentProps<SemconvFilterSection>) {
+export function legacyNamespaceLabel(namespace: string) {
+  return namespace === NOT_IN_SEMCONV_VALUE
+    ? t('sidebar.semconv.not-in-registry', 'Not in registry')
+    : t('sidebar.semconv.legacy-namespace-label', 'Namespace: {{namespace}}', { namespace });
+}
+
+function SemconvFilterSectionRenderer({ model }: Readonly<SceneComponentProps<SemconvFilterSection>>) {
   const styles = useStyles2(getStyles);
-  const { title, description, groups, selectedNamespaces, loading } = model.useState();
-  const selected = new Set(selectedNamespaces);
+  const { title, description, families, selectedFamilies, includeUnmatched, selectedNamespaces, search, status } =
+    model.useState();
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const firstSelected = selectedFamilies[0];
+  useEffect(() => model.requestFamilies(), [model]);
+  useEffect(() => {
+    if (status === 'ready' && firstSelected) {
+      listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView?.({ block: 'nearest' });
+    }
+  }, [firstSelected, status]);
+  const selected = new Set(selectedFamilies);
+  const observed = new Set(families);
+  const visible = [...new Set([...families, ...selectedFamilies])]
+    .filter((name) => name.toLowerCase().includes(search.toLowerCase().trim()))
+    .sort((a, b) => a.localeCompare(b));
 
   return (
     <div className={styles.container} data-testid="semconv-filter-section">
       <SectionTitle title={title} description={description} />
-
+      <Input
+        prefix={<Icon name="search" />}
+        aria-label={t('sidebar.semconv.search', 'Search metric families')}
+        placeholder={t('sidebar.semconv.search', 'Search metric families')}
+        value={search}
+        onChange={(event) => model.setState({ search: event.currentTarget.value })}
+      />
       <div className={styles.toolbar}>
-        <Button size="sm" variant="secondary" fill="text" onClick={model.onSelectAll} disabled={loading}>
-          <Trans i18nKey="sidebar.semconv.select-all">Select all</Trans>
+        <Button size="sm" variant="secondary" fill="text" onClick={model.onSelectAll} disabled={status !== 'ready'}>
+          <Trans i18nKey="sidebar.semconv.select-visible">Select visible</Trans>
         </Button>
-        <Button size="sm" variant="secondary" fill="text" onClick={model.onClear} disabled={loading}>
+        <Button
+          size="sm"
+          variant="secondary"
+          fill="text"
+          onClick={model.onClear}
+          disabled={!selectedFamilies.length && !includeUnmatched && !selectedNamespaces.length}
+        >
           <Trans i18nKey="sidebar.semconv.clear">Clear</Trans>
         </Button>
       </div>
-
-      <div className={styles.list}>
-        {loading && (
-          <LoadingPlaceholder text={t('sidebar.semconv.loading', 'Loading semconv…')} />
-        )}
-        {!loading && groups.length === 0 && (
+      {selectedNamespaces.length > 0 && (
+        <div className={styles.legacy}>
+          <span>{selectedNamespaces.map(legacyNamespaceLabel).join(', ')}</span>
+          <Button size="sm" variant="secondary" fill="text" onClick={model.onClearNamespaces}>
+            <Trans i18nKey="sidebar.semconv.clear-legacy">Clear legacy filter</Trans>
+          </Button>
+        </div>
+      )}
+      {(status === 'idle' || status === 'loading') && (
+        <LoadingPlaceholder text={t('sidebar.semconv.loading', 'Loading metric families…')} />
+      )}
+      {status === 'error' && (
+        <div role="alert">
+          <Trans i18nKey="sidebar.semconv.error">Registry lookup failed. Active selections remain restricted.</Trans>
+          <Button size="sm" variant="secondary" onClick={model.refresh}>
+            <Trans i18nKey="sidebar.semconv.retry">Retry</Trans>
+          </Button>
+        </div>
+      )}
+      <div className={styles.list} ref={listRef}>
+        <div className={styles.row}>
+          <div className={styles.rowLabel}>
+            <Checkbox
+              id={`unmatched-${listId}`}
+              aria-label={unmatchedMetricLabel()}
+              value={includeUnmatched}
+              onChange={model.onToggleUnmatched}
+            />
+            <label className={styles.name} htmlFor={`unmatched-${listId}`}>
+              {unmatchedMetricLabel()}
+            </label>
+          </div>
+        </div>
+        {status === 'ready' && visible.length === 0 && (
           <div className={styles.empty}>
-            <Trans i18nKey="sidebar.semconv.empty">No metrics to categorize.</Trans>
+            <Trans i18nKey="sidebar.semconv.empty-families">No matching metric families.</Trans>
           </div>
         )}
-        {!loading &&
-          groups.map((g) => (
-            <label key={g.value} className={styles.row}>
-              <Checkbox value={selected.has(g.value)} onChange={() => model.onToggle(g.value)} />
-              <span className={styles.rowLabel}>{g.label}</span>
-              <span className={styles.rowCount}>{g.count}</span>
-            </label>
-          ))}
+        {visible.map((name) => (
+          <div key={name} className={styles.row} data-selected={selected.has(name)}>
+            <div className={styles.rowLabel}>
+              <Checkbox
+                id={`${listId}-${encodeURIComponent(name)}`}
+                value={selected.has(name)}
+                onChange={() => model.onToggle(name)}
+                aria-label={name}
+              />
+              <label className={styles.name} htmlFor={`${listId}-${encodeURIComponent(name)}`}>
+                {name}
+                {status === 'ready' && !observed.has(name) && (
+                  <span className={styles.unavailable}>
+                    <Trans i18nKey="sidebar.semconv.unavailable">Not found in current list</Trans>
+                  </span>
+                )}
+              </label>
+            </div>
+            <a
+              className={styles.link}
+              href={`${config.appSubUrl ?? ''}${registryDefinitionPath('metric', name)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={t('sidebar.semconv.registry-link', 'View {{name}} in registry', {
+                name,
+                interpolation: { escapeValue: false },
+              })}
+              title={t('sidebar.semconv.registry-link', 'View {{name}} in registry', {
+                name,
+                interpolation: { escapeValue: false },
+              })}
+            >
+              <Icon name="external-link-alt" size="sm" />
+            </a>
+          </div>
+        ))}
       </div>
     </div>
   );
-}
-
-function bucketFor(metricName: string, bucketMap: Map<string, string | null>): string {
-  const ns = bucketMap.get(metricName);
-  return ns ?? NOT_IN_SEMCONV_VALUE;
-}
-
-function labelFor(value: string): string {
-  if (value === NOT_IN_SEMCONV_VALUE) {
-    return 'Not in semconv';
-  }
-  return value;
 }
 
 function getStyles(theme: GrafanaTheme2) {
@@ -287,45 +448,33 @@ function getStyles(theme: GrafanaTheme2) {
       flexDirection: 'column',
       gap: theme.spacing(1),
       height: '100%',
-      overflowY: 'hidden',
+      overflow: 'hidden',
     }),
-    empty: css({
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      padding: theme.spacing(1),
-    }),
-    list: css({
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      overflowY: 'auto',
-      padding: theme.spacing(0, 1, 1, 1),
-    }),
+    empty: css({ color: theme.colors.text.secondary, padding: theme.spacing(1) }),
+    legacy: css({ color: theme.colors.text.secondary, fontSize: theme.typography.bodySmall.fontSize }),
+    list: css({ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' }),
     row: css({
-      alignItems: 'center',
-      cursor: 'pointer',
       display: 'flex',
-      gap: theme.spacing(1),
+      alignItems: 'flex-start',
+      gap: theme.spacing(0.5),
       padding: theme.spacing(0.5, 0),
       '&:hover': { backgroundColor: theme.colors.action.hover },
     }),
-    rowCount: css({
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      marginLeft: 'auto',
-    }),
     rowLabel: css({
-      color: theme.colors.text.primary,
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: theme.spacing(1),
+      cursor: 'pointer',
+      flex: 1,
+      minWidth: 0,
+    }),
+    name: css({
       fontFamily: theme.typography.fontFamilyMonospace,
       fontSize: theme.typography.bodySmall.fontSize,
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap',
+      overflowWrap: 'anywhere',
     }),
-    toolbar: css({
-      display: 'flex',
-      gap: theme.spacing(0.5),
-      padding: theme.spacing(0, 1),
-    }),
+    unavailable: css({ display: 'block', color: theme.colors.text.secondary, fontFamily: theme.typography.fontFamily }),
+    link: css({ flexShrink: 0, '&, &:hover, &:focus-visible': { color: theme.colors.text.link } }),
+    toolbar: css({ display: 'flex', gap: theme.spacing(0.5) }),
   };
 }

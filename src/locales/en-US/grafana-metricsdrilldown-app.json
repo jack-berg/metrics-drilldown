@@ -409,6 +409,7 @@
       "prefix": "prefix",
       "recent": "recent",
       "rule-group": "rule group",
+      "semconv": "semconv family",
       "suffix": "suffix"
     },
     "labels-browser": {
@@ -431,8 +432,25 @@
       "recent-metrics-description": "Filter metrics based on when they started being ingested",
       "rules-filters": "Rules filters",
       "rules-filters-description": "Filter metrics and recording rules",
+      "semconv-filters": "Semantic conventions",
+      "semconv-filters-description": "Filter metrics by OpenTelemetry metric family",
       "suffix-filters": "Suffix filters",
       "suffix-filters-description": "Filter metrics based on their name suffix"
+    },
+    "semconv": {
+      "clear": "Clear",
+      "clear-legacy": "Clear legacy filter",
+      "empty-families": "No matching metric families.",
+      "error": "Registry lookup failed. Active selections remain restricted.",
+      "legacy-namespace-label": "Namespace: {{namespace}}",
+      "loading": "Loading metric families…",
+      "no-registry-match": "No registry match",
+      "not-in-registry": "Not in registry",
+      "registry-link": "View {{name}} in registry",
+      "retry": "Retry",
+      "search": "Search metric families",
+      "select-visible": "Select visible",
+      "unavailable": "Not found in current list"
     }
   },
   "slo-tracked-badge": {

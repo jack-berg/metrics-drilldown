@@ -32,12 +32,14 @@ import { EventMetricsVariableActivated } from './metrics-variables/events/EventM
 import { EventMetricsVariableDeactivated } from './metrics-variables/events/EventMetricsVariableDeactivated';
 import { EventMetricsVariableLoaded } from './metrics-variables/events/EventMetricsVariableLoaded';
 import { FilteredMetricsVariable, VAR_FILTERED_METRICS_VARIABLE } from './metrics-variables/FilteredMetricsVariable';
+import { type MetricOptions } from './metrics-variables/MetricsVariable';
 import { MetricsVariableFilterEngine, type MetricFilters } from './metrics-variables/MetricsVariableFilterEngine';
 import { MetricsVariableSortEngine } from './metrics-variables/MetricsVariableSortEngine';
 import { MetricsGroupByList } from './MetricsGroupByList/MetricsGroupByList';
 import { MetricsList } from './MetricsList/MetricsList';
 import { EventFiltersChanged } from './SideBar/sections/MetricsFilterSection/EventFiltersChanged';
 import { MetricsFilterSection } from './SideBar/sections/MetricsFilterSection/MetricsFilterSection';
+import { SemconvFilterSection } from './SideBar/sections/SemconvFilterSection/SemconvFilterSection';
 import { SideBar } from './SideBar/SideBar';
 
 interface MetricsReducerState extends SceneObjectState {
@@ -147,7 +149,10 @@ export class MetricsReducer extends SceneObjectBase<MetricsReducerState> {
 
       filterEngine.setInitOptions(options);
 
+      const semconv = this.state.sidebar.state.sections?.find((section) => section instanceof SemconvFilterSection);
       const filters: Partial<MetricFilters> = {
+        semconvMetrics:
+          semconv instanceof SemconvFilterSection ? semconv.getFilter(options as MetricOptions) : undefined,
         names: quickSearch.state.value ? [quickSearch.state.value] : [],
       };
 

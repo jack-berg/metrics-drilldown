@@ -7,6 +7,9 @@ const { nodeModulesToTransform, grafanaESModules } = require('./.config/jest/uti
 const esModules = [
   ...grafanaESModules,
   '@bsull/augurs',
+  '@react-hookz/web',
+  '@ver0/deep-equal',
+  '@marcbachmann/cel-js',
   'monaco-promql',
   'tsqtsq',
   'marked',
@@ -25,6 +28,10 @@ module.exports = {
   transformIgnorePatterns: [nodeModulesToTransform(esModules)],
   moduleNameMapper: {
     ...baseConfig.moduleNameMapper,
+    '^react(/.*)?$': '<rootDir>/node_modules/react$1',
+    '^react-dom(/.*)?$': '<rootDir>/node_modules/react-dom$1',
+    '^@grafana/(data|runtime|ui|schema)$': '<rootDir>/node_modules/@grafana/$1',
+    '^@emotion/react$': '<rootDir>/node_modules/@emotion/react',
     '\\.svg$': '<rootDir>/src/test/mocks/svgMock.js',
     '^.+/logger/logger$': '<rootDir>/src/test/mocks/loggerMock.ts',
     '^.+/interactions$': '<rootDir>/src/test/mocks/interactionsMock.ts',

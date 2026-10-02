@@ -1,6 +1,7 @@
 import { css, cx } from '@emotion/css';
 import { availableIconsIndex, VariableHide, type GrafanaTheme2 } from '@grafana/data';
 import { t } from '@grafana/i18n';
+import { SEMCONV_METRIC_FAMILY_PARAM } from '@grafana/otel-semconv-client';
 import {
   AdHocFiltersVariable,
   sceneGraph,
@@ -29,7 +30,13 @@ import { EventSectionValueChanged } from './sections/EventSectionValueChanged';
 import { LabelsBrowser } from './sections/LabelsBrowser/LabelsBrowser';
 import { MetricsFilterSection } from './sections/MetricsFilterSection/MetricsFilterSection';
 import { RecentMetricsSection } from './sections/RecentMetricsSection/RecentMetricsSection';
-import { SEMCONV_SECTION_KEY, SemconvFilterSection } from './sections/SemconvFilterSection/SemconvFilterSection';
+import {
+  legacyNamespaceLabel,
+  SEMCONV_SECTION_KEY,
+  SEMCONV_UNMATCHED_PARAM,
+  SemconvFilterSection,
+  unmatchedMetricLabel,
+} from './sections/SemconvFilterSection/SemconvFilterSection';
 import { CustomIcons, SideBarButton } from './SideBarButton';
 import { reportExploreMetrics } from '../../shared/tracking/interactions';
 
@@ -67,10 +74,7 @@ function getTranslatedSectionInfo(key: string): { title: string; description: st
     },
     'filters-semconv': {
       title: t('sidebar.section.semconv-filters', 'Semantic conventions'),
-      description: t(
-        'sidebar.section.semconv-filters-description',
-        'Filter metrics by OpenTelemetry semantic-convention namespace'
-      ),
+      description: t('sidebar.section.semconv-filters-description', 'Filter metrics by OpenTelemetry metric family'),
     },
     'groupby-labels': {
       title: t('sidebar.section.group-by-labels', 'Group by labels'),
@@ -98,6 +102,14 @@ type MetricFiltersVariable = (typeof metricFiltersVariables)[number];
 export class SideBar extends SceneObjectBase<SideBarState> {
   constructor(state: Partial<SideBarState>) {
     const sectionValues = SideBar.getSectionValuesFromUrl();
+    const selectedFamilies = SideBar.getMetricFamiliesFromUrl();
+    const includeUnmatched = SideBar.getUnmatchedFromUrl();
+    const selectedNamespaces = sectionValues.get(SEMCONV_SECTION_KEY) ?? [];
+    sectionValues.set(SEMCONV_SECTION_KEY, [
+      ...selectedFamilies,
+      ...(includeUnmatched ? [unmatchedMetricLabel()] : []),
+      ...selectedNamespaces.map(legacyNamespaceLabel),
+    ]);
 
     super({
       key: 'sidebar',
@@ -150,10 +162,13 @@ export class SideBar extends SceneObjectBase<SideBarState> {
           title: t('sidebar.section.semconv-filters', 'Semantic conventions'),
           description: t(
             'sidebar.section.semconv-filters-description',
-            'Filter metrics by OpenTelemetry semantic-convention namespace'
+            'Filter metrics by OpenTelemetry metric family'
           ),
           icon: 'book',
           active: Boolean(sectionValues.get(SEMCONV_SECTION_KEY)?.length),
+          selectedFamilies,
+          includeUnmatched,
+          selectedNamespaces,
         }),
         new LabelsBrowser({
           key: 'groupby-labels',
@@ -173,6 +188,11 @@ export class SideBar extends SceneObjectBase<SideBarState> {
       ...state,
     });
 
+    if (selectedFamilies.length || includeUnmatched) {
+      this.setState({
+        visibleSection: this.state.sections.find((section) => section instanceof SemconvFilterSection) ?? null,
+      });
+    }
     this.addActivationHandler(this.onActivate.bind(this));
   }
 
@@ -185,7 +205,13 @@ export class SideBar extends SceneObjectBase<SideBarState> {
       const newSectionValues = new Map(sectionValues).set(key, values);
       this.setOtherMetricFilters(newSectionValues);
       this.setState({ sectionValues: newSectionValues });
+      if (event.payload.open && this.state.visibleSection?.state.key !== key) {
+        this.setActiveSection(key);
+      }
     });
+
+    const semconv = this.state.sections.find((section) => section instanceof SemconvFilterSection);
+    const deactivateSemconv = semconv?.activate();
 
     // Open the sidebar to the most recently selected section if the "Default Open Sidebar" experiment is enabled
     if (!this.state.visibleSection?.state.key) {
@@ -197,6 +223,7 @@ export class SideBar extends SceneObjectBase<SideBarState> {
     }
 
     return () => {
+      deactivateSemconv?.();
       cleanupOtherMetricsVar();
     };
   }
@@ -212,7 +239,7 @@ export class SideBar extends SceneObjectBase<SideBarState> {
       'filters-prefix': t('sidebar.filter-type.prefix', 'prefix'),
       'filters-suffix': t('sidebar.filter-type.suffix', 'suffix'),
       'filters-recent': t('sidebar.filter-type.recent', 'recent'),
-      'filters-semconv': t('sidebar.filter-type.semconv', 'semconv namespace'),
+      'filters-semconv': t('sidebar.filter-type.semconv', 'semconv family'),
     };
 
     const newFilters = Array.from(sectionValues.entries()).reduce<Array<AdHocFilterWithLabels<{}>>>(
@@ -285,6 +312,20 @@ export class SideBar extends SceneObjectBase<SideBarState> {
     }
 
     return sectionValues;
+  }
+
+  private static getMetricFamiliesFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const namespaced = params.getAll(`${embeddedTrailNamespace}-${SEMCONV_METRIC_FAMILY_PARAM}`);
+    return [...new Set((namespaced.length ? namespaced : params.getAll(SEMCONV_METRIC_FAMILY_PARAM)).filter(Boolean))];
+  }
+
+  private static getUnmatchedFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    return (
+      (params.get(`${embeddedTrailNamespace}-${SEMCONV_UNMATCHED_PARAM}`) ?? params.get(SEMCONV_UNMATCHED_PARAM)) ===
+      'true'
+    );
   }
 
   private setActiveSection(sectionKey: string) {

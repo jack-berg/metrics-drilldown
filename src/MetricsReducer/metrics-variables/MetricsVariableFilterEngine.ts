@@ -11,7 +11,7 @@ export type MetricFilters = {
   names: string[];
   firingAlertMetrics: string[];
   sloTrackedMetrics: string[];
-  semconvMetrics: string[];
+  semconvMetrics?: string[];
 };
 
 export class MetricsVariableFilterEngine {
@@ -24,7 +24,7 @@ export class MetricsVariableFilterEngine {
     names: [],
     firingAlertMetrics: [],
     sloTrackedMetrics: [],
-    semconvMetrics: [],
+    semconvMetrics: undefined,
   };
 
   constructor(variable: QueryVariable) {
@@ -81,7 +81,7 @@ export class MetricsVariableFilterEngine {
       );
     }
 
-    if (filters.semconvMetrics.length > 0) {
+    if (filters.semconvMetrics !== undefined) {
       filteredOptions = MetricsVariableFilterEngine.applyExactMetricNamesFilter(
         filteredOptions,
         filters.semconvMetrics
@@ -108,7 +108,7 @@ export class MetricsVariableFilterEngine {
       !updatedFilters.names.length &&
       !updatedFilters.firingAlertMetrics.length &&
       !updatedFilters.sloTrackedMetrics.length &&
-      !updatedFilters.semconvMetrics.length
+      updatedFilters.semconvMetrics === undefined
     ) {
       this.filters = updatedFilters;
 
