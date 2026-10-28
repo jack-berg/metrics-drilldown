@@ -38,6 +38,14 @@ const names = [
 ];
 const getMany = jest.fn();
 
+function lookupResults(entries: Array<[string, { name: string; namespace?: string } | null]>) {
+  const results = new Map<string, Array<{ name: string; namespace?: string }>>(names.map((name) => [name, []]));
+  for (const [name, entry] of entries) {
+    results.set(name, entry ? [entry] : []);
+  }
+  return results;
+}
+
 function setup(families: string[] = [], loading = false, namespaces: string[] = [], includeUnmatched = false) {
   const model = new SemconvFilterSection({
     title: 'Semantic conventions',
@@ -64,17 +72,41 @@ beforeEach(() => {
   jest
     .mocked(getDefaultSemconvSession)
     .mockReturnValue({ getMany } as unknown as NonNullable<ReturnType<typeof getDefaultSemconvSession>>);
-  getMany.mockImplementation(
-    async ({ keys }: { keys: string[] }) =>
-      new Map(
-        keys.map((name) => {
-          if (names.indexOf(name) < 4 && names.includes(name)) {
-            return [name, { name: family, namespace: 'http' }];
-          }
-          return [name, name === names[4] ? { name: counter, namespace: 'aspnetcore' } : null];
-        })
-      )
+  getMany.mockImplementation(async ({ keys }: { keys: string[] }) =>
+    lookupResults(
+      keys.map((name) => {
+        if (names.indexOf(name) < 4 && names.includes(name)) {
+          return [name, { name: family, namespace: 'http' }];
+        }
+        return [name, name === names[4] ? { name: counter, namespace: 'aspnetcore' } : null];
+      })
+    )
   );
+});
+
+it('matches every candidate family and does not classify ambiguous matches as unmatched', async () => {
+  const results = lookupResults([]);
+  results.set(names[0], [
+    { name: family, namespace: 'http' },
+    { name: counter, namespace: 'aspnetcore' },
+  ]);
+  getMany.mockResolvedValue(results);
+  const { model } = setup([counter]);
+  await model.refresh();
+  expect(model.state.families).toEqual([counter, family]);
+  expect(model.getFilter()).toEqual([names[0]]);
+  model.updateFromUrl({ [SEMCONV_METRIC_FAMILY_PARAM]: family });
+  expect(model.getFilter()).toEqual([names[0]]);
+  model.updateFromUrl({ [SEMCONV_UNMATCHED_PARAM]: 'true' });
+  expect(model.getFilter()).toEqual(names.slice(1));
+});
+
+it('does not classify omitted results as confirmed misses', async () => {
+  getMany.mockResolvedValue(new Map());
+  const { model } = setup([], false, [], true);
+  await model.refresh();
+  expect(model.state.status).toBe('error');
+  expect(model.getFilter()).toEqual([]);
 });
 
 it('does not request metadata until the section opens or a selection needs it', () => {
@@ -101,7 +133,6 @@ it('lists each identified canonical family once, alphabetically, without unknown
   expect(getMany).toHaveBeenCalledWith({
     kind: 'metric',
     keys: names,
-    signal: { metrics: 'prometheus' },
     fields: ['namespace'],
   });
 });
@@ -301,7 +332,7 @@ it('waits for metric loading, retains selections across datasource changes, and 
   expect(getMany).not.toHaveBeenCalled();
   act(() => variable.setState({ loading: false }));
   await waitFor(() => expect(model.getFilter()).toEqual(names.slice(0, 4)));
-  getMany.mockResolvedValue(new Map([['new_name', { name: family, namespace: 'http' }]]));
+  getMany.mockResolvedValue(lookupResults([['new_name', { name: family, namespace: 'http' }]]));
   act(() => variable.setState({ options: [{ value: 'new_name', label: 'new_name' }] }));
   expect(model.getFilter()).toEqual([]);
   await waitFor(() => expect(model.getFilter()).toEqual(['new_name']));
@@ -311,7 +342,7 @@ it('waits for metric loading, retains selections across datasource changes, and 
 });
 
 it('deduplicates simultaneous classification and applies the latest family selection', async () => {
-  let resolve!: (value: Map<string, { name: string; namespace: string }>) => void;
+  let resolve!: (value: ReturnType<typeof lookupResults>) => void;
   getMany.mockImplementationOnce(
     () =>
       new Promise((done) => {
@@ -323,7 +354,7 @@ it('deduplicates simultaneous classification and applies the latest family selec
   const duplicate = model.refresh();
   model.updateFromUrl({ [SEMCONV_METRIC_FAMILY_PARAM]: counter });
   resolve(
-    new Map([
+    lookupResults([
       [names[0], { name: family, namespace: 'http' }],
       [names[4], { name: counter, namespace: 'aspnetcore' }],
     ])
@@ -334,7 +365,7 @@ it('deduplicates simultaneous classification and applies the latest family selec
 });
 
 it('ignores stale datasource results after a newer option list is classified', async () => {
-  let resolve!: (value: Map<string, { name: string }>) => void;
+  let resolve!: (value: ReturnType<typeof lookupResults>) => void;
   getMany.mockImplementationOnce(
     () =>
       new Promise((done) => {
@@ -343,10 +374,10 @@ it('ignores stale datasource results after a newer option list is classified', a
   );
   const { model, variable } = setup([family]);
   const deactivate = model.activate();
-  getMany.mockResolvedValue(new Map([['new_name', { name: counter, namespace: 'aspnetcore' }]]));
+  getMany.mockResolvedValue(lookupResults([['new_name', { name: counter, namespace: 'aspnetcore' }]]));
   act(() => variable.setState({ options: [{ value: 'new_name', label: 'new_name' }] }));
   await waitFor(() => expect(model.state.status).toBe('ready'));
-  resolve(new Map([[names[0], { name: family }]]));
+  resolve(lookupResults([[names[0], { name: family }]]));
   await act(async () => {});
   expect(model.state.families).toEqual([counter]);
   expect(model.getFilter()).toEqual([]);
@@ -354,7 +385,7 @@ it('ignores stale datasource results after a newer option list is classified', a
 });
 
 it('discards pending metadata after deactivation', async () => {
-  let resolve!: (value: Map<string, { name: string }>) => void;
+  let resolve!: (value: ReturnType<typeof lookupResults>) => void;
   getMany.mockImplementationOnce(
     () =>
       new Promise((done) => {
@@ -364,14 +395,14 @@ it('discards pending metadata after deactivation', async () => {
   const { model } = setup([family]);
   const deactivate = model.activate();
   deactivate();
-  resolve(new Map([[names[0], { name: family }]]));
+  resolve(lookupResults([[names[0], { name: family }]]));
   await act(async () => {});
   expect(model.state.bucketMap.size).toBe(0);
   expect(model.getFilter()).toEqual([]);
 });
 
 it('does not restore an active restriction when cleared during classification', async () => {
-  let resolve!: (value: Map<string, { name: string }>) => void;
+  let resolve!: (value: ReturnType<typeof lookupResults>) => void;
   getMany.mockImplementationOnce(
     () =>
       new Promise((done) => {
@@ -381,7 +412,7 @@ it('does not restore an active restriction when cleared during classification', 
   const { model } = setup([family]);
   const request = model.refresh();
   model.onClear();
-  resolve(new Map([[names[0], { name: family }]]));
+  resolve(lookupResults([[names[0], { name: family }]]));
   await request;
   expect(model.state.active).toBe(false);
   expect(model.getFilter()).toBeUndefined();
@@ -476,7 +507,7 @@ it('waits for classification before treating a metric as unmatched and supports 
 
 it('excludes identified custom metrics and remains restrictive when all metrics are identified', async () => {
   getMany.mockResolvedValue(
-    new Map([['github_rate_limit_limit', { name: 'github.rate_limit.limit', namespace: 'github' }]])
+    lookupResults([['github_rate_limit_limit', { name: 'github.rate_limit.limit', namespace: 'github' }]])
   );
   const { model, variable } = setup([], false, [], true);
   variable.setState({ options: [{ value: 'github_rate_limit_limit', label: 'github_rate_limit_limit' }] });
@@ -517,7 +548,7 @@ it('links from each family to its exact registry definition without toggling its
     await waitFor(() => expect(model.state.status).toBe('ready'));
     const link = screen.getByRole('link', { name: `View ${name} in registry` });
     const url = new URL(link.getAttribute('href')!, 'http://localhost');
-    expect(url.pathname).toBe('/grafana/a/grafana-otel-schema-registry-app/metrics');
+    expect(url.pathname).toBe('/grafana/a/grafana-otelschemaregistry-app/metrics');
     expect(url.searchParams.get('name')).toBe(name);
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');

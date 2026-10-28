@@ -61,8 +61,8 @@ beforeEach(() => {
     .mockReturnValue({ getMany } as unknown as NonNullable<ReturnType<typeof getDefaultSemconvSession>>);
   getMany.mockResolvedValue(
     new Map([
-      ['duration_seconds_count', { name: family, namespace: 'http' }],
-      ['sign_ins_total', { name: counter, namespace: 'aspnetcore' }],
+      ['duration_seconds_count', [{ name: family, namespace: 'http' }]],
+      ['sign_ins_total', [{ name: counter, namespace: 'aspnetcore' }]],
     ])
   );
 });

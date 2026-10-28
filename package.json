@@ -45,7 +45,7 @@
     "@grafana/faro-core": "^2.2.4",
     "@grafana/faro-web-sdk": "^2.2.1",
     "@grafana/i18n": "^13.1.0",
-    "@grafana/otel-semconv-client": "file:../grafana-otel-schema-registry-app/packages/semconv-client",
+    "@grafana/otel-semconv-client": "file:../grafana-otel-schema-registry-app-hackathon-shared-client/packages/semconv-client",
     "@grafana/lezer-logql": "^0.2.9",
     "@grafana/prometheus": "^13.1.0",
     "@grafana/runtime": "^13.1.0",

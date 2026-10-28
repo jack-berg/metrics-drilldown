@@ -47,7 +47,7 @@ interface SemconvFilterSectionState extends SideBarSectionState {
   search: string;
   status: 'idle' | 'loading' | 'ready' | 'error';
   options: MetricOptions;
-  bucketMap: Map<string, MetricIdentity | null>;
+  bucketMap: Map<string, MetricIdentity[]>;
 }
 
 export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionState> {
@@ -163,11 +163,14 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
     const namespaces = new Set(selectedNamespaces);
     return options
       .filter((option) => {
-        const entry = bucketMap.get(option.value);
-        const namespace = entry ? (entry.namespace ?? entry.name.split('.')[0]) : NOT_IN_SEMCONV_VALUE;
-        return (
-          (!restrictFamilies || (entry ? families.has(entry.name) : includeUnmatched)) &&
-          (!namespaces.size || namespaces.has(namespace))
+        const entries = bucketMap.get(option.value)!;
+        if (!entries.length) {
+          return (!restrictFamilies || includeUnmatched) && (!namespaces.size || namespaces.has(NOT_IN_SEMCONV_VALUE));
+        }
+        return entries.some(
+          (entry) =>
+            (!restrictFamilies || families.has(entry.name)) &&
+            (!namespaces.size || namespaces.has(entry.namespace ?? entry.name.split('.')[0]))
         );
       })
       .map((option) => option.value);
@@ -224,8 +227,7 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
       const families = [
         ...new Set(
           options.flatMap((option) => {
-            const entry = bucketMap.get(option.value);
-            return entry ? [entry.name] : [];
+            return (bucketMap.get(option.value) ?? []).map((entry) => entry.name);
           })
         ),
       ].sort((a, b) => a.localeCompare(b));
@@ -249,12 +251,17 @@ export class SemconvFilterSection extends SceneObjectBase<SemconvFilterSectionSt
     const results = await session.getMany<SemconvMetric>({
       kind: 'metric',
       keys,
-      signal: { metrics: 'prometheus' },
       fields: ['namespace'],
     });
     for (const name of keys) {
-      const entry = results.get(name);
-      bucketMap.set(name, entry ? { name: entry.name, namespace: entry.namespace } : null);
+      const entries = results.get(name);
+      if (!entries) {
+        throw new Error(`Registry lookup omitted candidates for ${name}`);
+      }
+      bucketMap.set(
+        name,
+        entries.map((entry) => ({ name: entry.name, namespace: entry.namespace }))
+      );
     }
     return bucketMap;
   }
